@@ -1,0 +1,466 @@
+import cv2
+import mediapipe as mp
+import time
+import math
+import pygame
+import os
+import threading
+
+# ==============================
+# CONFIGURACIÓN
+# ==============================
+
+TIEMPO_ALERTA = 0.5
+UMBRAL_OJO = 0.22
+
+RESOLUCION_ANCHO = 640
+RESOLUCION_ALTO = 480
+
+# ==============================
+# AUDIO
+# ==============================
+
+pygame.mixer.init()
+
+CARPETA_PROGRAMA = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
+RUTA_AUDIO = os.path.join(
+    CARPETA_PROGRAMA,
+    "alarma.mp3"
+)
+
+try:
+    pygame.mixer.music.load(RUTA_AUDIO)
+    AUDIO_CARGADO = True
+    print("Alarma cargada correctamente.")
+except Exception as error:
+    AUDIO_CARGADO = False
+    print("No se pudo cargar alarma.mp3")
+    print(error)
+
+
+def reproducir_alarma():
+    if AUDIO_CARGADO and not pygame.mixer.music.get_busy():
+        pygame.mixer.music.play()
+
+
+# ==============================
+# MEDIAPIPE
+# ==============================
+
+mp_face_mesh = mp.solutions.face_mesh
+
+face_mesh = mp_face_mesh.FaceMesh(
+    max_num_faces=1,
+    refine_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
+
+# ==============================
+# CÁMARA
+# ==============================
+
+camara = cv2.VideoCapture(0)
+
+camara.set(cv2.CAP_PROP_FRAME_WIDTH, RESOLUCION_ANCHO)
+camara.set(cv2.CAP_PROP_FRAME_HEIGHT, RESOLUCION_ALTO)
+
+if not camara.isOpened():
+    print("No se pudo abrir la cámara.")
+    face_mesh.close()
+    pygame.quit()
+    raise SystemExit
+
+print(
+    "Resolución detectada:",
+    int(camara.get(cv2.CAP_PROP_FRAME_WIDTH)),
+    "x",
+    int(camara.get(cv2.CAP_PROP_FRAME_HEIGHT))
+)
+
+# ==============================
+# PUNTOS DE LOS OJOS
+# ==============================
+
+OJO_IZQ = {
+    "izquierda": 33,
+    "derecha": 133,
+    "arriba": 159,
+    "abajo": 145
+}
+
+OJO_DER = {
+    "izquierda": 362,
+    "derecha": 263,
+    "arriba": 386,
+    "abajo": 374
+}
+
+# ==============================
+# FUNCIONES
+# ==============================
+
+def distancia(p1, p2):
+    return math.sqrt(
+        (p1.x - p2.x) ** 2 +
+        (p1.y - p2.y) ** 2
+    )
+
+
+def apertura_ojo(puntos, ojo):
+    ancho = distancia(
+        puntos[ojo["izquierda"]],
+        puntos[ojo["derecha"]]
+    )
+
+    alto = distancia(
+        puntos[ojo["arriba"]],
+        puntos[ojo["abajo"]]
+    )
+
+    if ancho == 0:
+        return 0
+
+    return alto / ancho
+
+
+# ==============================
+# VARIABLES
+# ==============================
+
+inicio_ojos_cerrados = None
+alarma_activa = False
+tiempo_cerrados = 0
+
+# ==============================
+# VENTANA
+# ==============================
+
+NOMBRE_VENTANA = "SENTINELA - Detector de Somnolencia"
+
+cv2.namedWindow(NOMBRE_VENTANA, cv2.WINDOW_NORMAL)
+cv2.resizeWindow(
+    NOMBRE_VENTANA,
+    RESOLUCION_ANCHO,
+    RESOLUCION_ALTO
+)
+
+# ==============================
+# BUCLE PRINCIPAL
+# ==============================
+
+try:
+    while True:
+
+        correcto, frame = camara.read()
+
+        if not correcto:
+            break
+
+        frame = cv2.flip(frame, 1)
+        alto, ancho, _ = frame.shape
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        resultado = face_mesh.process(rgb)
+
+        estado = "BUSCANDO ROSTRO"
+        color_estado = (0, 200, 255)
+        apertura_promedio = 0
+
+        # ==============================
+        # DETECCIÓN DEL ROSTRO
+        # ==============================
+
+        if resultado.multi_face_landmarks:
+
+            rostro = resultado.multi_face_landmarks[0]
+            puntos = rostro.landmark
+
+            ojo_izquierdo = apertura_ojo(puntos, OJO_IZQ)
+            ojo_derecho = apertura_ojo(puntos, OJO_DER)
+
+            apertura_promedio = (
+                ojo_izquierdo + ojo_derecho
+            ) / 2
+
+            # ==============================
+            # DETECCIÓN DE CIERRE
+            # ==============================
+
+            if apertura_promedio < UMBRAL_OJO:
+
+                if inicio_ojos_cerrados is None:
+                    inicio_ojos_cerrados = time.time()
+
+                tiempo_cerrados = (
+                    time.time() - inicio_ojos_cerrados
+                )
+
+                estado = "OJOS CERRADOS"
+                color_estado = (0, 170, 255)
+
+                if (
+                    tiempo_cerrados >= TIEMPO_ALERTA
+                    and not alarma_activa
+                ):
+                    alarma_activa = True
+
+                    threading.Thread(
+                        target=reproducir_alarma,
+                        daemon=True
+                    ).start()
+
+            else:
+                inicio_ojos_cerrados = None
+                tiempo_cerrados = 0
+                alarma_activa = False
+
+                estado = "CONDUCTOR ATENTO"
+                color_estado = (0, 220, 100)
+
+                if pygame.mixer.music.get_busy():
+                    pygame.mixer.music.stop()
+
+            # ==============================
+            # PUNTOS DE LOS OJOS
+            # ==============================
+
+            indices = [
+                33, 133, 159, 145,
+                362, 263, 386, 374
+            ]
+
+            for indice in indices:
+                punto = puntos[indice]
+
+                x = int(punto.x * ancho)
+                y = int(punto.y * alto)
+
+                cv2.circle(
+                    frame,
+                    (x, y),
+                    1,
+                    (0, 200, 255),
+                    -1
+                )
+
+        else:
+            # Si se pierde el rostro, reiniciar el contador
+            inicio_ojos_cerrados = None
+            tiempo_cerrados = 0
+            alarma_activa = False
+
+            if pygame.mixer.music.get_busy():
+                pygame.mixer.music.stop()
+
+        # ==============================
+        # CABECERA
+        # ==============================
+
+        cv2.rectangle(
+            frame,
+            (0, 0),
+            (ancho, 60),
+            (25, 25, 25),
+            -1
+        )
+
+        cv2.rectangle(
+            frame,
+            (0, 0),
+            (ancho, 1),
+            (0, 190, 255),
+            -1
+        )
+
+        cv2.putText(
+            frame,
+            "SENTINELA",
+            (18, 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 190, 255),
+            1,
+            cv2.LINE_AA
+        )
+
+        cv2.putText(
+            frame,
+            "Detector de somnolencia",
+            (18, 48),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.35,
+            (150, 150, 150),
+            1,
+            cv2.LINE_AA
+        )
+
+        # Cámara activa
+        cv2.circle(
+            frame,
+            (ancho - 135, 27),
+            3,
+            (0, 220, 100),
+            -1
+        )
+
+        cv2.putText(
+            frame,
+            "CAMARA ACTIVA",
+            (ancho - 123, 31),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.32,
+            (160, 160, 160),
+            1,
+            cv2.LINE_AA
+        )
+
+        # ==============================
+        # PANEL INFERIOR
+        # ==============================
+
+        panel_y = alto - 82
+
+        cv2.rectangle(
+            frame,
+            (0, panel_y),
+            (ancho, alto),
+            (25, 25, 25),
+            -1
+        )
+
+        cv2.rectangle(
+            frame,
+            (0, panel_y),
+            (ancho, panel_y + 1),
+            color_estado,
+            -1
+        )
+
+        # Estado
+        cv2.putText(
+            frame,
+            "ESTADO",
+            (18, panel_y + 22),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.30,
+            (125, 125, 125),
+            1,
+            cv2.LINE_AA
+        )
+
+        cv2.putText(
+            frame,
+            estado,
+            (18, panel_y + 48),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            color_estado,
+            1,
+            cv2.LINE_AA
+        )
+
+        # Apertura
+        cv2.putText(
+            frame,
+            "APERTURA",
+            (220, panel_y + 22),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.30,
+            (125, 125, 125),
+            1,
+            cv2.LINE_AA
+        )
+
+        cv2.putText(
+            frame,
+            f"{apertura_promedio:.3f}",
+            (220, panel_y + 48),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (220, 220, 220),
+            1,
+            cv2.LINE_AA
+        )
+
+        # Tiempo con los ojos cerrados
+        cv2.putText(
+            frame,
+            "TIEMPO",
+            (380, panel_y + 22),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.30,
+            (125, 125, 125),
+            1,
+            cv2.LINE_AA
+        )
+
+        cv2.putText(
+            frame,
+            f"{tiempo_cerrados:.1f} s",
+            (380, panel_y + 48),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (220, 220, 220),
+            1,
+            cv2.LINE_AA
+        )
+
+        # ==============================
+        # ALERTA VISUAL
+        # ==============================
+
+        if alarma_activa:
+
+            if int(time.time() * 4) % 2 == 0:
+                cv2.rectangle(
+                    frame,
+                    (4, 64),
+                    (ancho - 4, panel_y - 4),
+                    (0, 0, 255),
+                    1
+                )
+
+            cv2.putText(
+                frame,
+                "ALERTA DE SOMNOLENCIA",
+                (ancho // 2 - 130, 95),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 0, 255),
+                1,
+                cv2.LINE_AA
+            )
+
+        # Salir
+        cv2.putText(
+            frame,
+            "Q: salir",
+            (ancho - 58, alto - 9),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.28,
+            (95, 95, 95),
+            1,
+            cv2.LINE_AA
+        )
+
+        cv2.imshow(NOMBRE_VENTANA, frame)
+
+        tecla = cv2.waitKey(1) & 0xFF
+
+        if tecla == ord("q"):
+            break
+
+finally:
+    camara.release()
+    cv2.destroyAllWindows()
+
+    pygame.mixer.music.stop()
+    pygame.quit()
+
+    face_mesh.close()
+
+    print("Programa finalizado.")
